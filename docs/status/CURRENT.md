@@ -10,12 +10,15 @@ Harnessing has been initialized as a standalone repository and starts from a CLI
 - package skeleton exists under `src/harnessing`
 - local SQLite runtime state is designed under `.harnessing`
 - generic CLI commands exist for init, ingest, search, context, bundle, capture, memories, and stats
+- Windows-first project policy is now explicit
+- the proving-ground plus productization dual-track model is now documented
 
 ## Current Risks
 
 - transcript ingestion is not implemented yet
 - vector search is not implemented yet
 - repo integration contracts for consuming projects are still minimal
+- non-Windows support is intentionally deferred and not yet validated
 
 ## Next Engineering Target
 

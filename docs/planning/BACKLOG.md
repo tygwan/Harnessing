@@ -7,6 +7,7 @@
 - define runtime storage rules under `.harnessing`
 - define import boundary from project docs and memento files
 - add transcript ingestion design
+- define the first repo integration contract for `ontology-for-cm`
 
 ## Near Term
 
@@ -14,6 +15,7 @@
 - add write/edit event ingestion
 - define JSON bundle export format
 - define repo integration contract for consuming projects
+- add first Codex and Claude Code usage templates
 
 ## Later
 

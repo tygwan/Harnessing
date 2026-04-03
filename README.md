@@ -24,6 +24,14 @@ Why CLI first:
 - local workflows for Codex and Claude Code can call it immediately
 - later interfaces such as HTTP APIs, editor integrations, and hooks can be added on top of the same core
 
+## Platform Policy
+
+Harnessing is currently `Windows-first`.
+
+- primary development and verification start on Windows
+- macOS and Linux are planned later
+- the core engine is kept portable where practical, but non-Windows support is not yet a delivery target
+
 ## Package Layout
 
 - `src/harnessing`

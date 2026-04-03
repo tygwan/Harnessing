@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,6 +58,12 @@ class SearchHit:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def normalize_search_query(query: str) -> str:
+    cleaned = re.sub(r"[^\w\s]", " ", query, flags=re.UNICODE)
+    normalized = " ".join(cleaned.split())
+    return normalized or query
 
 
 def ensure_parent() -> None:
@@ -377,6 +384,7 @@ def capture_memory(kind: str, title: str, summary: str, content: str, tags: str)
 
 
 def query_hits(conn: sqlite3.Connection, query: str, limit: int) -> list[SearchHit]:
+    normalized_query = normalize_search_query(query)
     memory_rows = conn.execute(
         """
         SELECT memories.kind, memories.title, memories.source_path, snippet(memories_fts, 3, '[', ']', ' ... ', 16) AS snippet, bm25(memories_fts) AS score
@@ -386,7 +394,7 @@ def query_hits(conn: sqlite3.Connection, query: str, limit: int) -> list[SearchH
         ORDER BY score
         LIMIT ?
         """,
-        (query, limit),
+        (normalized_query, limit),
     ).fetchall()
     section_rows = conn.execute(
         """
@@ -397,7 +405,7 @@ def query_hits(conn: sqlite3.Connection, query: str, limit: int) -> list[SearchH
         ORDER BY score
         LIMIT ?
         """,
-        (query, limit),
+        (normalized_query, limit),
     ).fetchall()
     hits = [
         SearchHit("memory", row["kind"], row["source_path"] or "<manual>", row["title"], row["snippet"], row["score"])
