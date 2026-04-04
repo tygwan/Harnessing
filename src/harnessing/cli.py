@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ DEFAULT_SOURCES = [
     REPO_ROOT / "docs",
     REPO_ROOT / "README.md",
 ]
+TRANSCRIPT_EXTENSIONS = {".txt", ".md", ".log", ".jsonl"}
 
 
 @dataclass
@@ -56,6 +58,17 @@ class SearchHit:
     score: float
 
 
+@dataclass
+class TranscriptRecord:
+    path: str
+    source_kind: str
+    entry_kind: str
+    speaker: str
+    content: str
+    tags: str
+    block_index: int
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -64,6 +77,10 @@ def normalize_search_query(query: str) -> str:
     cleaned = re.sub(r"[^\w\s]", " ", query, flags=re.UNICODE)
     normalized = " ".join(cleaned.split())
     return normalized or query
+
+
+def read_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
 
 
 def ensure_parent() -> None:
@@ -186,8 +203,178 @@ def first_nonempty_line(text: str) -> str:
     return ""
 
 
+def infer_transcript_source_kind(path: Path, explicit: str | None = None) -> str:
+    if explicit:
+        return explicit.strip().lower()
+    lowered = path.as_posix().lower()
+    if "claude" in lowered:
+        return "claude"
+    if "codex" in lowered:
+        return "codex"
+    return "unknown"
+
+
+def transcript_entry_kind(entry_kind: str | None, speaker: str, content: str) -> str:
+    normalized = (entry_kind or "").strip().lower()
+    if normalized in {
+        "transcript-entry",
+        "transcript-message",
+        "transcript-tool",
+        "transcript-decision",
+        "transcript-reflection",
+        "transcript-technique",
+    }:
+        return normalized
+    marker_source = f"{speaker}\n{content}".lower()
+    if "decision:" in marker_source or marker_source.startswith("decision"):
+        return "transcript-decision"
+    if "reflection:" in marker_source or marker_source.startswith("reflection"):
+        return "transcript-reflection"
+    if "technique:" in marker_source or marker_source.startswith("technique"):
+        return "transcript-technique"
+    if "tool:" in marker_source or "called tool" in marker_source or "request starting http" in marker_source:
+        return "transcript-tool"
+    if speaker or content:
+        return "transcript-message"
+    return "transcript-entry"
+
+
+def split_transcript_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    buffer: list[str] = []
+    for line in text.splitlines():
+        if line.strip():
+            buffer.append(line.rstrip())
+            continue
+        if buffer:
+            blocks.append("\n".join(buffer).strip())
+            buffer = []
+    if buffer:
+        blocks.append("\n".join(buffer).strip())
+    return blocks
+
+
+def parse_jsonl_transcript(path: Path, source_kind: str) -> list[TranscriptRecord]:
+    records: list[TranscriptRecord] = []
+    for index, line in enumerate(read_text_file(path).splitlines(), start=1):
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            continue
+        content = str(payload.get("content") or payload.get("text") or payload.get("message") or "").strip()
+        speaker = str(payload.get("speaker") or payload.get("role") or payload.get("author") or "").strip()
+        kind = transcript_entry_kind(payload.get("kind"), speaker, content)
+        tags = {
+            "transcript",
+            source_kind,
+            kind,
+        }
+        extra_tags = payload.get("tags") or []
+        if isinstance(extra_tags, str):
+            extra_tags = [extra_tags]
+        for tag in extra_tags:
+            if tag:
+                tags.add(str(tag).strip().lower())
+        if not content:
+            continue
+        records.append(
+            TranscriptRecord(
+                path=str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                source_kind=source_kind,
+                entry_kind=kind,
+                speaker=speaker or "unknown",
+                content=content,
+                tags=",".join(sorted(tags)),
+                block_index=index,
+            )
+        )
+    return records
+
+
+def parse_text_transcript(path: Path, source_kind: str) -> list[TranscriptRecord]:
+    blocks = split_transcript_blocks(read_text_file(path))
+    records: list[TranscriptRecord] = []
+    for index, block in enumerate(blocks, start=1):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        first_line = lines[0]
+        speaker = "unknown"
+        content = block.strip()
+        if ":" in first_line and len(first_line.split(":", 1)[0]) <= 24:
+            speaker, remainder = first_line.split(":", 1)
+            speaker = speaker.strip() or "unknown"
+            remainder = remainder.strip()
+            content = "\n".join([remainder] + lines[1:]).strip()
+        kind = transcript_entry_kind(None, speaker, content)
+        if content.startswith("Decision:"):
+            kind = "transcript-decision"
+        elif content.startswith("Reflection:"):
+            kind = "transcript-reflection"
+        elif content.startswith("Technique:"):
+            kind = "transcript-technique"
+        elif content.startswith("Tool:"):
+            kind = "transcript-tool"
+        tags = ",".join(sorted({"transcript", source_kind, kind, path.stem.lower()}))
+        records.append(
+            TranscriptRecord(
+                path=str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                source_kind=source_kind,
+                entry_kind=kind,
+                speaker=speaker,
+                content=content,
+                tags=tags,
+                block_index=index,
+            )
+        )
+    return records
+
+
+def parse_transcript_file(path: Path, source_kind: str) -> list[TranscriptRecord]:
+    if path.suffix.lower() == ".jsonl":
+        return parse_jsonl_transcript(path, source_kind)
+    return parse_text_transcript(path, source_kind)
+
+
+def transcript_memory_title(record: TranscriptRecord) -> str:
+    preview = first_nonempty_line(record.content)
+    if len(preview) > 80:
+        preview = preview[:77] + "..."
+    return f"{record.source_kind}:{record.entry_kind}:{preview or 'transcript'}"
+
+
+def transcript_memory_summary(record: TranscriptRecord) -> str:
+    speaker = record.speaker if record.speaker else "unknown"
+    return f"{speaker} | {first_nonempty_line(record.content)[:240]}"
+
+
+def derive_transcript_memories(records: list[TranscriptRecord]) -> list[MemoryRecord]:
+    now = utc_now_iso()
+    memories: list[MemoryRecord] = []
+    for record in records:
+        memories.append(
+            MemoryRecord(
+                kind=record.entry_kind,
+                title=transcript_memory_title(record),
+                summary=transcript_memory_summary(record),
+                content=record.content,
+                tags=record.tags,
+                origin="transcript",
+                source_path=record.path,
+                source_heading=f"{record.source_kind} #{record.block_index}",
+                content_hash=hashlib.sha256(
+                    f"transcript|{record.path}|{record.block_index}|{record.entry_kind}|{record.content}".encode("utf-8")
+                ).hexdigest(),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return memories
+
+
 def split_sections(path: Path) -> list[SectionRecord]:
-    text = path.read_text(encoding="utf-8")
+    text = read_text_file(path)
     lines = text.splitlines()
     title = path.stem
     kind = classify_kind(path)
@@ -358,6 +545,36 @@ def ingest(raw_sources: list[str] | None) -> None:
     print(f"derived memories: {len(memories)}")
 
 
+def iter_transcript_paths(sources: list[Path]) -> Iterable[Path]:
+    for source in sources:
+        if source.is_file() and source.suffix.lower() in TRANSCRIPT_EXTENSIONS:
+            yield source
+        elif source.is_dir():
+            for path in sorted(source.rglob("*")):
+                if path.is_file() and path.suffix.lower() in TRANSCRIPT_EXTENSIONS:
+                    yield path
+
+
+def ingest_transcripts(raw_sources: list[str] | None, source_kind: str | None) -> None:
+    init_db()
+    sources = resolve_sources(raw_sources)
+    records: list[TranscriptRecord] = []
+    for path in iter_transcript_paths(sources):
+        try:
+            records.extend(parse_transcript_file(path, infer_transcript_source_kind(path, source_kind)))
+        except Exception as exc:
+            print(f"skipped transcript: {path} ({exc})")
+
+    memories = derive_transcript_memories(records)
+
+    with connect() as conn:
+        insert_memories(conn, memories)
+        rebuild_fts(conn)
+
+    print(f"transcript records: {len(records)}")
+    print(f"transcript memories: {len(memories)}")
+
+
 def capture_memory(kind: str, title: str, summary: str, content: str, tags: str) -> None:
     init_db()
     now = utc_now_iso()
@@ -510,6 +727,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--source", action="append", dest="sources")
     subparsers.add_parser("stats")
 
+    transcript_parser = subparsers.add_parser("transcript")
+    transcript_subparsers = transcript_parser.add_subparsers(dest="transcript_command", required=True)
+    transcript_ingest_parser = transcript_subparsers.add_parser("ingest")
+    transcript_ingest_parser.add_argument("--source", action="append", dest="sources")
+    transcript_ingest_parser.add_argument("--source-kind", default=None)
+
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=8)
@@ -544,6 +767,8 @@ def main() -> None:
         ingest(args.sources)
     elif args.command == "stats":
         cmd_stats()
+    elif args.command == "transcript" and args.transcript_command == "ingest":
+        ingest_transcripts(args.sources, args.source_kind)
     elif args.command == "search":
         cmd_search(args.query, args.limit)
     elif args.command == "context":

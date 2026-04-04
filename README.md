@@ -46,14 +46,18 @@ Harnessing is currently `Windows-first`.
 ```powershell
 python src/harnessing/cli.py init
 python src/harnessing/cli.py ingest
+python src/harnessing/cli.py transcript ingest --source <path>
 python src/harnessing/cli.py stats
 python src/harnessing/cli.py search "document delta"
 python src/harnessing/cli.py context "diagnostics requestId" --limit 3
 python src/harnessing/cli.py bundle "backend actions externalevent" --limit 4
 python src/harnessing/cli.py capture --kind decision --title "Example" --summary "Short summary"
+python src/harnessing/cli.py transcript ingest --source .\\samples\\transcript.jsonl
 ```
 
 ## Initial Target
 
 The first target is a portable SQLite/FTS memory engine that can be validated in `ontology-for-cm` and then reused across projects.
+
+The next target is transcript-aware ingestion so Codex and Claude Code session artifacts can become searchable memory entries instead of remaining raw logs.
 

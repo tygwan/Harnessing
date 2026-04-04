@@ -17,6 +17,7 @@ Project Sources
   - heading-based source document sections
 - `memories`
   - derived or manually captured memory entries
+- transcript items are normalized into `memories` first in the current prototype
 
 ## Runtime State
 
