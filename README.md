@@ -1,63 +1,123 @@
-﻿# Harnessing
+# Harnessing
 
-Shared memory harness for agent-driven development workflows.
+![Windows First](https://img.shields.io/badge/platform-Windows%20first-0f766e)
+![Python](https://img.shields.io/badge/python-3.11%2B-2563eb)
+![Storage](https://img.shields.io/badge/storage-SQLite%20FTS5-7c3aed)
+![Interface](https://img.shields.io/badge/interface-CLI%20first-f59e0b)
 
-## Purpose
+Reusable project memory, search, and context bundle engine for Codex and Claude Code.
 
-Harnessing combines:
+## Why
+
+Large projects slow down when every session has to reload too much context.
+
+Harnessing keeps high-value project memory small, searchable, and reusable by combining:
 
 - `memento`
 - project docs
 - derived memory entries
-- local search
+- transcript-derived memories
 - compact context bundles
 
-The goal is to give Codex and Claude Code a reusable local memory/context layer without requiring the full codebase to be loaded on every task.
+## What It Does
 
-## Current Shape
+- ingests project docs into a local SQLite/FTS index
+- derives reusable memory entries from status, testing, troubleshooting, and memento docs
+- ingests transcript files into searchable memory entries
+- emits `lean`, `work`, and `deep` context bundles with token-aware budgets
+- prefers reusable memory over duplicate raw doc sections
 
-This repository starts as a CLI-first core engine.
+## Architecture
 
-Why CLI first:
+```text
+Consumer Repo Artifacts
+  -> Ingestion
+     -> sections
+     -> derived memories
+     -> transcript memories
+  -> Retrieval
+     -> search
+     -> context
+     -> bundle
+  -> Agent Consumption
+     -> Codex
+     -> Claude Code
+```
 
-- the memory engine can be tested step by step
-- local workflows for Codex and Claude Code can call it immediately
-- later interfaces such as HTTP APIs, editor integrations, and hooks can be added on top of the same core
+## Why CLI First
+
+Harnessing starts as a CLI-first core engine because it keeps the memory layer easy to verify and easy to embed later.
+
+- testable one step at a time
+- immediately callable from local agent workflows
+- clean foundation for later HTTP APIs, hooks, and editor integrations
 
 ## Platform Policy
 
 Harnessing is currently `Windows-first`.
 
-- primary development and verification start on Windows
+- development and verification start on Windows
 - macOS and Linux are planned later
-- the core engine is kept portable where practical, but non-Windows support is not yet a delivery target
+- the core stays portable where practical, but non-Windows support is not yet a delivery target
 
-## Package Layout
-
-- `src/harnessing`
-  - reusable Python package
-- `docs`
-  - direction, planning, status, testing, and technical specs
-- `.harnessing`
-  - local runtime state such as SQLite databases
-
-## Core Commands
+## Quick Start
 
 ```powershell
 python src/harnessing/cli.py init
 python src/harnessing/cli.py ingest
-python src/harnessing/cli.py transcript ingest --source <path>
 python src/harnessing/cli.py stats
 python src/harnessing/cli.py search "document delta"
-python src/harnessing/cli.py context "diagnostics requestId" --limit 3
-python src/harnessing/cli.py bundle "backend actions externalevent" --limit 4
-python src/harnessing/cli.py capture --kind decision --title "Example" --summary "Short summary"
-python src/harnessing/cli.py transcript ingest --source .\\samples\\transcript.jsonl
+python src/harnessing/cli.py context "diagnostics requestId" --limit 3 --mode work
+python src/harnessing/cli.py bundle "backend actions externalevent" --limit 4 --mode lean
+python src/harnessing/cli.py transcript ingest --source <path>
 ```
 
-## Initial Target
+## Bundle Modes
 
-The first target is a portable SQLite/FTS memory engine that can be validated in `ontology-for-cm` and then reused across projects.
+| Mode | Use | Goal |
+|------|-----|------|
+| `lean` | session startup | minimum token cost |
+| `work` | active implementation | balanced detail |
+| `deep` | debugging and review | fuller context |
 
-The next target is transcript-aware ingestion so Codex and Claude Code session artifacts can become searchable memory entries instead of remaining raw logs.
+Each bundle reports:
 
+- selected item count
+- char usage
+- estimated token count
+
+## Current Shape
+
+- package: `src/harnessing`
+- docs: `docs/`
+- local runtime state: `.harnessing/`
+
+## First Consumer
+
+`ontology-for-cm` is the proving-ground consumer for Harnessing.
+
+The working model is:
+
+```text
+ontology-for-cm proves a useful pattern
+  -> Harnessing generalizes it
+  -> ontology-for-cm consumes it again
+```
+
+## Docs
+
+- [Documentation System](./docs/README.md)
+- [Architecture](./docs/tech-specs/ARCHITECTURE.md)
+- [Platform Support](./docs/tech-specs/PLATFORM-SUPPORT.md)
+- [Dual-Track Operating Model](./docs/tech-specs/DUAL-TRACK-OPERATING-MODEL.md)
+- [Consumer Integration Contract](./docs/tech-specs/CONSUMER-INTEGRATION-CONTRACT.md)
+- [Transcript Ingestion Spec](./docs/tech-specs/TRANSCRIPT-INGESTION-SPEC.md)
+- [Smoke Test](./docs/testing/SMOKE-TEST.md)
+- [Transcript Ingestion Test](./docs/testing/TRANSCRIPT-INGESTION-TEST.md)
+
+## Near-Term Focus
+
+- strengthen transcript parsing and memory promotion
+- add tool-write and edit-event ingestion
+- add machine-readable context bundle export
+- keep token usage low while improving retrieval quality

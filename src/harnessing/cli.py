@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -56,6 +57,9 @@ class SearchHit:
     heading: str
     snippet: str
     score: float
+    origin: str = ""
+    source_heading: str = ""
+    summary: str = ""
 
 
 @dataclass
@@ -77,6 +81,24 @@ def normalize_search_query(query: str) -> str:
     cleaned = re.sub(r"[^\w\s]", " ", query, flags=re.UNICODE)
     normalized = " ".join(cleaned.split())
     return normalized or query
+
+
+def normalize_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, math.ceil(len(text) / 4))
+
+
+def clip_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
 
 
 def read_text_file(path: Path) -> str:
@@ -575,6 +597,47 @@ def ingest_transcripts(raw_sources: list[str] | None, source_kind: str | None) -
     print(f"transcript memories: {len(memories)}")
 
 
+def hit_priority(hit: SearchHit) -> int:
+    if hit.source_type == "memory":
+        if hit.origin == "transcript":
+            return 4
+        if hit.kind in {"project-memory", "next-step", "risk", "status-working", "troubleshooting", "decision", "technique"}:
+            return 0
+        if hit.kind in {"harness-spec"}:
+            return 1
+        if hit.kind in {"test-procedure"}:
+            return 2
+        return 3
+    if hit.source_type == "doc":
+        if hit.kind in {"tech-spec", "status", "direction", "decision"}:
+            return 1
+        if hit.kind in {"planning", "root-doc"}:
+            return 2
+        if hit.kind in {"testing", "troubleshooting"}:
+            return 3
+    return 5
+
+
+def dedupe_key(hit: SearchHit) -> str:
+    if hit.source_type == "memory" and hit.origin == "derived" and hit.path not in {"", "<manual>"}:
+        source_heading = hit.source_heading or hit.heading
+        return f"{normalize_key(hit.path)}::{normalize_key(source_heading)}"
+    if hit.source_type == "doc":
+        return f"{normalize_key(hit.path)}::{normalize_key(hit.heading)}"
+    return f"{hit.source_type}::{normalize_key(hit.path)}::{normalize_key(hit.heading)}"
+
+
+def dedupe_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    selected: dict[str, SearchHit] = {}
+    ordered_keys: list[str] = []
+    for hit in sorted(hits, key=lambda item: (hit_priority(item), item.score)):
+        key = dedupe_key(hit)
+        if key not in selected:
+            selected[key] = hit
+            ordered_keys.append(key)
+    return [selected[key] for key in ordered_keys]
+
+
 def capture_memory(kind: str, title: str, summary: str, content: str, tags: str) -> None:
     init_db()
     now = utc_now_iso()
@@ -604,7 +667,7 @@ def query_hits(conn: sqlite3.Connection, query: str, limit: int) -> list[SearchH
     normalized_query = normalize_search_query(query)
     memory_rows = conn.execute(
         """
-        SELECT memories.kind, memories.title, memories.source_path, snippet(memories_fts, 3, '[', ']', ' ... ', 16) AS snippet, bm25(memories_fts) AS score
+        SELECT memories.kind, memories.title, memories.source_path, memories.origin, memories.source_heading, memories.summary, snippet(memories_fts, 3, '[', ']', ' ... ', 16) AS snippet, bm25(memories_fts) AS score
         FROM memories_fts
         JOIN memories ON memories.id = memories_fts.rowid
         WHERE memories_fts MATCH ?
@@ -625,14 +688,24 @@ def query_hits(conn: sqlite3.Connection, query: str, limit: int) -> list[SearchH
         (normalized_query, limit),
     ).fetchall()
     hits = [
-        SearchHit("memory", row["kind"], row["source_path"] or "<manual>", row["title"], row["snippet"], row["score"])
+        SearchHit(
+            "memory",
+            row["kind"],
+            row["source_path"] or "<manual>",
+            row["title"],
+            row["snippet"],
+            row["score"],
+            origin=row["origin"] or "",
+            source_heading=row["source_heading"] or "",
+            summary=row["summary"] or "",
+        )
         for row in memory_rows
     ] + [
         SearchHit("doc", row["kind"], row["path"], row["heading"], row["snippet"], row["score"])
         for row in section_rows
     ]
-    hits.sort(key=lambda item: (item.score, item.source_type != "memory"))
-    return hits[:limit]
+    hits.sort(key=lambda item: (hit_priority(item), item.score))
+    return dedupe_hits(hits)[:limit]
 
 
 def cmd_search(query: str, limit: int) -> None:
@@ -646,13 +719,80 @@ def cmd_search(query: str, limit: int) -> None:
         print(f"   {hit.snippet}")
 
 
-def cmd_context(query: str, limit: int) -> None:
+def mode_defaults(mode: str) -> dict[str, int]:
+    if mode == "lean":
+        return {
+            "max_chars": 1800,
+            "max_items": 4,
+            "memory_chars": 220,
+            "doc_chars": 260,
+            "transcript_chars": 160,
+        }
+    if mode == "deep":
+        return {
+            "max_chars": 9000,
+            "max_items": 10,
+            "memory_chars": 1200,
+            "doc_chars": 1500,
+            "transcript_chars": 600,
+        }
+    return {
+        "max_chars": 4200,
+        "max_items": 6,
+        "memory_chars": 520,
+        "doc_chars": 700,
+        "transcript_chars": 320,
+    }
+
+
+def render_memory_row(row: sqlite3.Row, mode: str, max_chars: int) -> str:
+    header = f"### memory | {row['kind']} | {row['title']} | {row['origin']} | {row['source_path'] or '<manual>'}"
+    summary = f"Summary: {row['summary']}"
+    tags = f"Tags: {row['tags']}"
+    if row["origin"] == "transcript":
+        body_limit = min(mode_defaults(mode)["transcript_chars"], max_chars)
+    else:
+        body_limit = min(mode_defaults(mode)["memory_chars"], max_chars)
+    if mode == "lean":
+        body = clip_text(row["summary"], body_limit)
+        return "\n".join([header, summary, tags, body]).strip()
+    body = clip_text(row["content"], body_limit)
+    return "\n".join([header, summary, tags, body]).strip()
+
+
+def render_doc_row(row: sqlite3.Row, mode: str, max_chars: int) -> str:
+    header = f"### doc | {row['kind']} | {row['path']} | {row['heading']}"
+    body_limit = min(mode_defaults(mode)["doc_chars"], max_chars)
+    body = clip_text(row["content"], body_limit)
+    return "\n".join([header, body]).strip()
+
+
+def build_context_payload(query: str, limit: int, mode: str, max_chars: int | None, max_items: int | None) -> dict[str, object]:
+    defaults = mode_defaults(mode)
+    char_budget = max_chars or defaults["max_chars"]
+    item_budget = max_items or defaults["max_items"]
     with connect() as conn:
-        hits = query_hits(conn, query, limit)
+        hits = query_hits(conn, query, max(item_budget, limit))
         if not hits:
-            print("no context matches")
-            return
+            return {
+                "items": [],
+                "used_chars": 0,
+                "estimated_tokens": 0,
+                "max_chars": char_budget,
+                "max_items": item_budget,
+                "selected_items": 0,
+                "mode": mode,
+            }
+
+        rendered_items: list[str] = []
+        used_chars = 0
         for hit in hits:
+            if len(rendered_items) >= item_budget:
+                break
+            remaining = char_budget - used_chars
+            if remaining < 180:
+                break
+
             if hit.source_type == "memory":
                 row = conn.execute(
                     """
@@ -664,11 +804,9 @@ def cmd_context(query: str, limit: int) -> None:
                     """,
                     (hit.kind, hit.heading, hit.path, hit.path),
                 ).fetchone()
-                print(f"### memory | {row['kind']} | {row['title']} | {row['origin']} | {row['source_path'] or '<manual>'}")
-                print(f"Summary: {row['summary']}")
-                print(f"Tags: {row['tags']}")
-                print(row["content"])
-                print()
+                if row is None:
+                    continue
+                rendered = render_memory_row(row, mode, remaining - 40)
             else:
                 row = conn.execute(
                     """
@@ -679,16 +817,52 @@ def cmd_context(query: str, limit: int) -> None:
                     """,
                     (hit.path, hit.heading),
                 ).fetchone()
-                print(f"### doc | {row['kind']} | {row['path']} | {row['heading']}")
-                print(row["content"])
-                print()
+                if row is None:
+                    continue
+                rendered = render_doc_row(row, mode, remaining - 40)
+
+            if not rendered:
+                continue
+            if len(rendered) > remaining:
+                rendered = clip_text(rendered, remaining)
+
+            rendered_items.append(rendered)
+            used_chars += len(rendered) + 2
+
+    final_text = "\n\n".join(rendered_items)
+    return {
+        "items": rendered_items,
+        "text": final_text,
+        "used_chars": len(final_text),
+        "estimated_tokens": estimate_tokens(final_text) if final_text else 0,
+        "max_chars": char_budget,
+        "max_items": item_budget,
+        "selected_items": len(rendered_items),
+        "mode": mode,
+    }
 
 
-def cmd_bundle(query: str, limit: int) -> None:
+def cmd_context(query: str, limit: int, mode: str, max_chars: int | None, max_items: int | None) -> None:
+    payload = build_context_payload(query, limit, mode, max_chars, max_items)
+    if not payload["items"]:
+        print("no context matches")
+        return
+    print(payload["text"])
+
+
+def cmd_bundle(query: str, limit: int, mode: str, max_chars: int | None, max_items: int | None) -> None:
+    payload = build_context_payload(query, limit, mode, max_chars, max_items)
+    if not payload["items"]:
+        print("no bundle matches")
+        return
     print("# Harness Context Bundle\n")
     print(f"- Query: {query}")
-    print(f"- GeneratedAtUtc: {utc_now_iso()}\n")
-    cmd_context(query, limit)
+    print(f"- Mode: {payload['mode']}")
+    print(f"- GeneratedAtUtc: {utc_now_iso()}")
+    print(f"- SelectedItems: {payload['selected_items']}/{payload['max_items']}")
+    print(f"- UsedChars: {payload['used_chars']}/{payload['max_chars']}")
+    print(f"- EstimatedTokens: {payload['estimated_tokens']}\n")
+    print(payload["text"])
 
 
 def cmd_memories(limit: int) -> None:
@@ -740,10 +914,16 @@ def build_parser() -> argparse.ArgumentParser:
     context_parser = subparsers.add_parser("context")
     context_parser.add_argument("query")
     context_parser.add_argument("--limit", type=int, default=5)
+    context_parser.add_argument("--mode", choices=["lean", "work", "deep"], default="work")
+    context_parser.add_argument("--max-chars", type=int)
+    context_parser.add_argument("--max-items", type=int)
 
     bundle_parser = subparsers.add_parser("bundle")
     bundle_parser.add_argument("query")
     bundle_parser.add_argument("--limit", type=int, default=5)
+    bundle_parser.add_argument("--mode", choices=["lean", "work", "deep"], default="lean")
+    bundle_parser.add_argument("--max-chars", type=int)
+    bundle_parser.add_argument("--max-items", type=int)
 
     capture_parser = subparsers.add_parser("capture")
     capture_parser.add_argument("--kind", required=True)
@@ -772,9 +952,9 @@ def main() -> None:
     elif args.command == "search":
         cmd_search(args.query, args.limit)
     elif args.command == "context":
-        cmd_context(args.query, args.limit)
+        cmd_context(args.query, args.limit, args.mode, args.max_chars, args.max_items)
     elif args.command == "bundle":
-        cmd_bundle(args.query, args.limit)
+        cmd_bundle(args.query, args.limit, args.mode, args.max_chars, args.max_items)
     elif args.command == "capture":
         capture_memory(args.kind, args.title, args.summary, args.content, args.tags)
     elif args.command == "memories":
