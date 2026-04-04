@@ -27,6 +27,22 @@ Harnessing keeps high-value project memory small, searchable, and reusable by co
 - emits `lean`, `work`, and `deep` context bundles with token-aware budgets
 - prefers reusable memory over duplicate raw doc sections
 
+## Continuity Status
+
+Harnessing is already good enough for `session recovery` after a fresh `/new` start.
+
+Current level:
+
+- durable enough to recover project direction and current status
+- not yet fully automatic or self-healing
+
+Still needed for stronger continuity:
+
+- startup presets per consumer repo
+- stronger transcript and tool-write promotion
+- query aliases and better retrieval guidance
+- consumer-side auto-invoke workflows
+
 ## Architecture
 
 ```text
@@ -112,6 +128,7 @@ ontology-for-cm proves a useful pattern
 - [Dual-Track Operating Model](./docs/tech-specs/DUAL-TRACK-OPERATING-MODEL.md)
 - [Consumer Integration Contract](./docs/tech-specs/CONSUMER-INTEGRATION-CONTRACT.md)
 - [Transcript Ingestion Spec](./docs/tech-specs/TRANSCRIPT-INGESTION-SPEC.md)
+- [Session Restart Workflow](./docs/tech-specs/SESSION-RESTART-WORKFLOW.md)
 - [Smoke Test](./docs/testing/SMOKE-TEST.md)
 - [Transcript Ingestion Test](./docs/testing/TRANSCRIPT-INGESTION-TEST.md)
 

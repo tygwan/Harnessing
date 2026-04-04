@@ -82,3 +82,13 @@ If this model is followed well, Harnessing can guide both projects more precisel
 - reusable context bundles
 
 But it will only do that well if the proving-ground project keeps producing clean source artifacts.
+
+## Continuity Implication
+
+This dual-track model is also the basis for session continuity.
+
+- the consumer project produces durable artifacts
+- Harnessing ingests and condenses them
+- a fresh session can recover direction from those artifacts without rereading the full project
+
+Today this is strong enough for guided recovery, but not yet strong enough for fully automatic continuity.
